@@ -1,479 +1,542 @@
+<div align="center">
+
 # 🏥 Healthcare Commission Payout Notification System
 
-A production-grade, event-driven microservices platform built in the **US healthcare insurance domain** — simulating how carriers pay commissions to agents, how disputes are filed, and how payouts are notified. Built for portfolio.
+**A production-style, event-driven microservices backend for US healthcare insurance commission tracking, payout notifications, and AI-powered dispute analysis.**
+
+[![Java](https://img.shields.io/badge/Java-21-orange?logo=openjdk&logoColor=white)](https://openjdk.org/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.2.5-6DB33F?logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![Apache Kafka](https://img.shields.io/badge/Kafka-Event%20Driven-231F20?logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.x-4479A1?logo=mysql&logoColor=white)](https://www.mysql.com/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+[Architecture](#architecture-overview) •
+[Services](#services) •
+[Quick Start](#getting-started) •
+[API Reference](#api-reference) •
+[Design Decisions](#key-design-decisions)
+
+</div>
 
 ---
 
-## 📌 Table of Contents
+## 🎯 What This Project Demonstrates
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Services](#services)
-- [Tech Stack](#tech-stack)
-- [Getting Started](#getting-started)
-- [API Reference](#api-reference)
-- [Kafka Event Flow](#kafka-event-flow)
-- [Project Structure](#project-structure)
-- [Frontend](#frontend)
-- [What This Project Demonstrates](#what-this-project-demonstrates)
-- [Roadmap](#roadmap)
+| Skill | Implementation |
+|-------|---------------|
+| **Microservices Architecture** | 4 independently deployable services with isolated databases |
+| **Event-Driven Design** | Apache Kafka for async communication with DLQ support |
+| **Security** | JWT stateless authentication with Spring Security + BCrypt |
+| **AI/NLP Integration** | Stanford CoreNLP + Groq LLM for hybrid entity extraction |
+| **Domain Modeling** | US healthcare insurance: agents, carriers, commissions, disputes |
+| **API Design** | RESTful APIs with validation, pagination, filtering, Swagger docs |
 
 ---
 
-## Overview
+## 📐 Architecture Overview
 
-In the US healthcare insurance market, **carriers** (e.g. Aetna, BCBS, UnitedHealth) pay **commissions** to **agents** (identified by NPN — National Producer Number) based on policies they sell. This system automates:
+```mermaid
+graph TB
+    subgraph "Client Layer"
+        PM["🔧 Postman / UI"]
+    end
+    
+    subgraph "API Services"
+        AS["🔐 Agent Service<br/>:8081<br/>Auth + Profiles"]
+        CS["💰 Commission Service<br/>:8082<br/>Calc + Lifecycle"]
+        NS["📧 Notification Service<br/>:8083<br/>Email Alerts"]
+        NER["🧠 NER Service<br/>:8084<br/>NLP + Groq AI"]
+    end
+    
+    subgraph "Message Broker"
+        KC["commission.calculated"]
+        KD["dispute.submitted"]
+    end
+    
+    subgraph "Data Stores"
+        ADB[("agentdb")]
+        CDB[("commissiondb")]
+        NDB[("notificationdb")]
+        NERDB[("nerdb")]
+    end
+    
+    subgraph "Infrastructure"
+        MH["📬 Mailhog<br/>:8025"]
+        KF["Apache Kafka<br/>:9092"]
+    end
+    
+    PM -->|"JWT Auth"| AS
+    PM --> CS
+    PM --> NER
+    
+    CS -->|"publish"| KC
+    KC -->|"consume"| NS
+    
+    NER -->|"publish HIGH priority"| KD
+    KD -->|"consume"| CS
+    
+    NS -->|"SMTP"| MH
+    
+    AS --- ADB
+    CS --- CDB
+    NS --- NDB
+    NER --- NERDB
+    
+    style AS fill:#4CAF50,color:#fff
+    style CS fill:#2196F3,color:#fff
+    style NS fill:#FF9800,color:#fff
+    style NER fill:#9C27B0,color:#fff
+```
 
-- Agent registration and JWT-based authentication
-- Commission record management and monthly payout calculation
-- Event-driven payout notifications via Apache Kafka
-- Free-text dispute submission with Named Entity Recognition (Stanford NLP)
-- Natural language Q&A over commission data using a local LLM (Ollama / Llama 3)
+### Event Flow
 
 ```
-Agent registers → Commission submitted → Commission calculated
-      → Kafka event published → Notification email sent
-            → Agent files dispute (free text)
-                  → NER extracts entities → Commission flagged for review
-                        → GenAI answers ops team queries in natural language
+Commission Payout Flow:
+┌──────────┐    ┌────────────────┐    ┌─────────────────┐    ┌────────┐
+│  Agent   │───▶│  Commission    │───▶│  Kafka Topic:   │───▶│ Notif. │───▶ 📧 Email
+│ Register │    │  Calculate     │    │  commission.    │    │Service │    (Mailhog)
+│ + Login  │    │                │    │  calculated     │    │        │
+└──────────┘    └────────────────┘    └─────────────────┘    └────────┘
+
+Dispute Analysis Flow:
+┌──────────┐    ┌────────────────┐    ┌─────────────────┐    ┌────────┐
+│ Dispute  │───▶│ Stanford NLP   │───▶│ Groq AI         │───▶│ Kafka  │───▶ Commission
+│ Text     │    │ + Regex Extract│    │ Analysis        │    │(HIGH)  │    Service
+│ Input    │    │                │    │                 │    │        │    (auto-flag)
+└──────────┘    └────────────────┘    └─────────────────┘    └────────┘
 ```
 
 ---
 
-## Architecture
+## 🧩 Services
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                  Healthcare Commission Platform                     │
-│                                                                     │
-│   ┌──────────────┐     REST      ┌────────────────────┐            │
-│   │ agent-service│◄─────────────►│ commission-service │            │
-│   │   port 8081  │               │    port 8082        │            │
-│   └──────────────┘               └────────┬───────────┘            │
-│          │ JWT Auth                        │                        │
-│          │                         Kafka Topic:                     │
-│          │                     commission.calculated                │
-│          │                                │                        │
-│          │                       ┌────────▼───────────┐            │
-│          │                       │notification-service │            │
-│          │                       │    port 8083        │            │
-│          │                       │  (Email via Mailhog)│            │
-│          │                       └────────────────────┘            │
-│          │                                                          │
-│   ┌──────▼──────┐    Kafka Topic:   ┌────────────────────┐         │
-│   │  ner-service│   dispute.submitted│ commission-service │         │
-│   │  port 8084  │──────────────────►│  (flags record)    │         │
-│   │(Stanford NLP)│                  └────────────────────┘         │
-│   └─────────────┘                                                   │
-│                                                                     │
-│   ┌──────────────┐    REST (calls all services)                     │
-│   │ genai-service│◄────────────────────────────────────────────     │
-│   │  port 8085   │  Natural language Q&A via Ollama (Llama 3)       │
-│   └──────────────┘                                                  │
-└─────────────────────────────────────────────────────────────────────┘
-```
+<details>
+<summary><b>🔐 Agent Service (Port 8081)</b> — Authentication & Agent Management</summary>
 
-**Each service has its own isolated MYSQL database. Services communicate via REST (sync) and Kafka (async).**
+### Responsibilities
+- JWT-based stateless authentication using Spring Security
+- BCrypt password encoding
+- Agent registration with NPN (National Producer Number) validation
+- Paginated agent listing
 
----
+### Endpoints
 
-## Services
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `POST` | `/api/agents/register` | Register new agent | ❌ |
+| `POST` | `/api/agents/login` | Login → JWT token | ❌ |
+| `GET` | `/api/agents/{npn}` | Get agent by NPN | ✅ |
+| `GET` | `/api/agents` | List all agents (paginated) | ✅ |
 
-### 1. `agent-service` — Port 8081
-Manages agent registration and authentication.
+### Database: `agentdb`
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/agents/register` | POST | Register a new agent |
-| `/api/agents/login` | POST | Login → returns JWT token |
-| `/api/agents/{npn}` | GET | Get agent by NPN |
-| `/api/agents` | GET | Paginated agent list |
+</details>
 
-- JWT-based stateless authentication (Spring Security)
-- NPN (National Producer Number) as unique agent identifier
-- Database: `agentdb`
+<details>
+<summary><b>💰 Commission Service (Port 8082)</b> — Commission Lifecycle & Kafka Producer</summary>
 
----
-
-### 2. `commission-service` — Port 8082
-Core commission management — submit, calculate, filter, and flag records.
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/commissions` | POST | Submit a commission record |
-| `/api/commissions/{id}/calculate` | PUT | Trigger calculation → publishes Kafka event |
-| `/api/commissions` | GET | Filtered + paginated list |
-| `/api/commissions/summary` | GET | Monthly payout summary by agent |
-| `/api/commissions/{id}/flag-dispute` | PUT | Flag a record for review |
-
+### Responsibilities
+- Submit commission records per agent per carrier per policy
+- Business rule validation (duplicate prevention, amount > 0, status checks)
+- Commission type support: `PERCENT`, `PMPM`, `PSPM`, `PMPY`, `PCPM`, `PSPY`, `PPPM`, `NA`
 - Status lifecycle: `PENDING → CALCULATED → PAID`
-- Publishes to Kafka topic: `commission.calculated`
-- Consumes from Kafka topic: `dispute.submitted` (flags affected record)
-- Database: `commissiondb`
+- Publishes `commission.calculated` Kafka event on calculation
+- Consumes `dispute.submitted` events to auto-flag commissions
 
----
+### Endpoints
 
-### 3. `notification-service` — Port 8083
-Listens for payout events and sends email notifications.
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `POST` | `/api/commissions` | Submit commission record | ✅ |
+| `PUT` | `/api/commissions/{id}/calculate` | Calculate + publish Kafka event | ✅ |
+| `PUT` | `/api/commissions/{id}/flag-dispute` | Flag for dispute review | ✅ |
+| `GET` | `/api/commissions` | List (filter: agentNpn, status, month) | ✅ |
+| `GET` | `/api/commissions/summary` | Payout summary by agent & month | ✅ |
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/notifications` | GET | Notification history by agent NPN |
+### Database: `commissiondb`
+### Kafka: Produces → `commission.calculated` / Consumes → `dispute.submitted`
 
-- Kafka consumer on topic: `commission.calculated`
-- Sends payout summary emails via JavaMailSender → Mailhog (local SMTP)
-- Dead Letter Topic: `commission.calculated.DLT` for failed deliveries
-- Retry: 3 attempts before routing to DLT
-- Database: `notificationdb`
+</details>
 
----
+<details>
+<summary><b>📧 Notification Service (Port 8083)</b> — Kafka Consumer & Email Delivery</summary>
 
-### 4. `ner-service` — Port 8084
-Analyses free-text dispute submissions using Stanford NLP Named Entity Recognition.
+### Responsibilities
+- Consumes `commission.calculated` Kafka events
+- Sends payout notification emails via Mailhog (SMTP)
+- Persists notification logs with `SENT` / `FAILED` status
+- Error handling with failed notification tracking
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/disputes/analyse` | POST | Extract entities + save + publish Kafka event |
-| `/api/disputes` | GET | Paginated dispute list |
-| `/api/disputes/{id}/resolve` | PUT | Mark dispute as resolved |
+### Endpoints
 
-**Example input:**
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `GET` | `/api/notifications` | Notification history (filter: agentNpn, status) | ✅ |
+
+### Database: `notificationdb`
+### Kafka: Consumes → `commission.calculated`
+
+</details>
+
+<details>
+<summary><b>🧠 NER Service (Port 8084)</b> — AI-Powered Dispute Intelligence</summary>
+
+### Responsibilities
+- Stanford CoreNLP extracts: `PERSON`, `ORGANIZATION`, `LOCATION`, `DATE`
+- Custom regex extracts: NPN (7-10 digit format), Policy ID (e.g., `EP-9921`)
+- Groq AI (`llama3-8b-8192`) analyses dispute validity, recommends action, assigns priority
+- Publishes `dispute.submitted` Kafka event for `HIGH` priority disputes
+- Dispute lifecycle: `OPEN → UNDER_REVIEW → RESOLVED / DENIED`
+
+### AI Pipeline
+
 ```
-"Agent John Smith, NPN 1234567, claims missing commission 
-from Aetna for policy EP-9921 in Ohio for March 2026"
+Dispute Text Input
+       │
+       ▼
+┌──────────────────────────────────┐
+│  Stanford CoreNLP                │
+│  → PERSON, ORG, LOCATION, DATE  │
+│  +                               │
+│  Custom Regex                    │
+│  → NPN, Policy ID               │
+└──────────────┬───────────────────┘
+               │
+               ▼
+┌──────────────────────────────────┐
+│  Groq API (llama3-8b-8192)      │
+│  → validity                      │
+│  → recommendedAction             │
+│  → reason                        │
+│  → priority (LOW/MEDIUM/HIGH)    │
+└──────────────┬───────────────────┘
+               │
+               ▼
+┌──────────────────────────────────┐
+│  Save to DB                      │
+│  + Kafka event if HIGH priority  │
+└──────────────────────────────────┘
 ```
 
-**Extracted entities:**
-```json
-{
-  "PERSON": "John Smith",
-  "ORGANIZATION": "Aetna",
-  "NPN": "1234567",
-  "POLICY": "EP-9921",
-  "LOCATION": "Ohio",
-  "DATE": "March 2026"
-}
-```
+### Endpoints
 
-- Publishes to Kafka topic: `dispute.submitted`
-- Database: `nerdb`
+| Method | Endpoint | Description | Auth |
+|--------|----------|-------------|------|
+| `POST` | `/api/disputes/analyse` | Analyse dispute text (NLP + Groq AI) | ❌ |
+| `GET` | `/api/disputes` | List disputes (filter: agentNpn, status) | ❌ |
+| `GET` | `/api/disputes/{id}` | Get dispute by ID | ❌ |
+| `PUT` | `/api/disputes/{id}/resolve` | Mark dispute as resolved | ❌ |
 
----
+### Database: `nerdb`
+### Kafka: Produces → `dispute.submitted`
 
-### 5. `genai-service` — Port 8085
-Natural language Q&A interface over commission data using Ollama (Llama 3).
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/api/query` | POST | Ask a natural language question |
-
-**Supported intents:**
-
-| Question Pattern | Calls |
-|---|---|
-| "Unpaid commissions for agent {NPN}" | `commission-service /api/commissions?agentNpn=X&status=PENDING` |
-| "Total payout for month {month}" | `commission-service /api/commissions/summary?month=X` |
-| "Disputes submitted today" | `ner-service /api/disputes?date=today` |
-| "Notifications for agent {NPN}" | `notification-service /api/notifications?agentNpn=X` |
-| "Agent details for NPN {NPN}" | `agent-service /api/agents/{npn}` |
-
-- Stateless — no database
-- Uses locally running Ollama at `http://localhost:11434/api/generate`
+</details>
 
 ---
 
-## Tech Stack
+## 🛠 Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Language | Java 21 |
-| Framework | Spring Boot 3.2 |
-| Messaging | Apache Kafka (Confluent) |
-| ORM | Spring Data JPA + Hibernate |
-| Databases | PostgreSQL 15 (one per service) |
-| Auth | Spring Security + JWT (stateless) |
-| NLP | Stanford CoreNLP |
-| GenAI | Ollama (Llama 3, local) |
-| Email | JavaMailSender + Mailhog (local SMTP) |
-| API Docs | Springdoc OpenAPI 2.x (Swagger UI) |
-| Containerisation | Docker + Docker Compose |
-| Build | Maven |
-| Frontend | Angular 17 / React 18 (see Frontend section) |
+| Layer | Technology | Purpose |
+|-------|-----------|---------|
+| **Language** | Java 21 | Records, virtual threads, pattern matching |
+| **Framework** | Spring Boot 3.2.5 | Auto-config, dependency injection, web |
+| **Security** | Spring Security + JWT (jjwt 0.11.5) | Stateless authentication |
+| **Database** | MySQL 8.x | Per-service isolated databases |
+| **ORM** | Spring Data JPA + Hibernate | Database access layer |
+| **Messaging** | Apache Kafka (Confluent 7.4.0) | Event-driven async communication |
+| **NLP** | Stanford CoreNLP 4.5.4 | Named entity recognition |
+| **AI/LLM** | Groq API (llama3-8b-8192) | Dispute analysis + classification |
+| **Email** | Mailhog | Local SMTP testing server |
+| **Containers** | Docker + Docker Compose | Infrastructure orchestration |
+| **Build** | Maven 3.9.x | Dependency management, builds |
+| **API Docs** | Springdoc OpenAPI 2.x | Swagger UI auto-generation |
 
 ---
 
-## Getting Started
+## 🚀 Getting Started
 
 ### Prerequisites
 
-- Java 21+
-- Maven 3.9+
-- Docker + Docker Compose
-- Ollama installed locally → [ollama.ai](https://ollama.ai)
+- ☕ Java 21 ([Temurin](https://adoptium.net/) recommended)
+- 📦 Maven 3.9+
+- 🐬 MySQL 8.x (running locally)
+- 🐳 Docker Desktop
+- 🔑 Groq API key (free at [console.groq.com](https://console.groq.com))
 
-### 1. Clone the repository
+### 1. Clone & Setup
 
 ```bash
 git clone https://github.com/ahiwalevikrant/healthcare-commission-notification-system.git
 cd healthcare-commission-notification-system
 ```
 
-### 2. Start infrastructure (Kafka + all databases + Mailhog)
+### 2. Start Infrastructure
 
 ```bash
 docker-compose up -d
 ```
 
-This starts:
-- Zookeeper + Kafka (port 9092)
-- agent-db (PostgreSQL, port 5433)
-- commission-db (PostgreSQL, port 5434)
-- notification-db (PostgreSQL, port 5435)
-- ner-db (PostgreSQL, port 5436)
-- Mailhog UI (port 8025) + SMTP (port 1025)
-
-### 3. Pull the Ollama model (for genai-service)
-
+Verify containers:
 ```bash
-ollama pull llama3
-ollama serve
+docker ps
+# Expected: zookeeper, kafka, mailhog
 ```
 
-### 4. Start each service
+### 3. Create Databases
 
-Open 5 terminals, one per service:
-
-```bash
-# Terminal 1
-cd agent-service && mvn spring-boot:run
-
-# Terminal 2
-cd commission-service && mvn spring-boot:run
-
-# Terminal 3
-cd notification-service && mvn spring-boot:run
-
-# Terminal 4
-cd ner-service && mvn spring-boot:run
-
-# Terminal 5
-cd genai-service && mvn spring-boot:run
+```sql
+CREATE DATABASE agentdb;
+CREATE DATABASE commissiondb;
+CREATE DATABASE notificationdb;
+CREATE DATABASE nerdb;
 ```
 
-### 5. Access Swagger UI for each service
+### 4. Create Kafka Topics
 
-| Service | Swagger URL |
-|---|---|
-| agent-service | http://localhost:8081/swagger-ui.html |
-| commission-service | http://localhost:8082/swagger-ui.html |
-| notification-service | http://localhost:8083/swagger-ui.html |
-| ner-service | http://localhost:8084/swagger-ui.html |
-| genai-service | http://localhost:8085/swagger-ui.html |
+```bash
+docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 \
+  --create --topic commission.calculated --partitions 1 --replication-factor 1
 
-### 6. View emails
+docker exec -it kafka kafka-topics --bootstrap-server localhost:9092 \
+  --create --topic dispute.submitted --partitions 1 --replication-factor 1
+```
 
-Open Mailhog UI at **http://localhost:8025** to see all payout notification emails.
+### 5. Configure Environment
+
+Update `application.yml` in each service:
+
+```yaml
+# MySQL password (all services)
+spring:
+  datasource:
+    password: your_mysql_password
+```
+
+```yaml
+# Groq API key (ner-service only)
+groq:
+  api:
+    key: your_groq_api_key_here
+```
+
+### 6. Start Services
+
+```bash
+# Start in this order (separate terminals)
+cd agent-service && mvn spring-boot:run         # Terminal 1
+cd commission-service && mvn spring-boot:run     # Terminal 2
+cd notification-service && mvn spring-boot:run   # Terminal 3
+cd ner-service && mvn spring-boot:run            # Terminal 4
+```
+
+### 7. Access UIs
+
+| Service | URL |
+|---------|-----|
+| Agent Service Swagger | http://localhost:8081/swagger-ui.html |
+| Commission Service Swagger | http://localhost:8082/swagger-ui.html |
+| Notification Service Swagger | http://localhost:8083/swagger-ui.html |
+| NER Service Swagger | http://localhost:8084/swagger-ui.html |
+| Mailhog (Email UI) | http://localhost:8025 |
 
 ---
 
-## API Reference
+## 📡 API Reference
 
-### Standard Response Wrapper
+<details>
+<summary><b>Register Agent</b></summary>
 
-All APIs return:
+```http
+POST http://localhost:8081/api/agents/register
+Content-Type: application/json
+```
 
+```json
+{
+  "name": "John Smith",
+  "npn": "1234567",
+  "email": "john@example.com",
+  "password": "test123",
+  "state": "Ohio",
+  "licenseNumber": "LIC001"
+}
+```
+
+</details>
+
+<details>
+<summary><b>Login</b></summary>
+
+```http
+POST http://localhost:8081/api/agents/login
+Content-Type: application/json
+```
+
+```json
+{
+  "npn": "1234567",
+  "password": "test123"
+}
+```
+
+Response:
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "npn": "1234567"
+}
+```
+
+</details>
+
+<details>
+<summary><b>Submit Commission</b></summary>
+
+```http
+POST http://localhost:8082/api/commissions
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+```json
+{
+  "agentNpn": "1234567",
+  "carrierId": "AETNA",
+  "policyId": "POL-001",
+  "month": "2024-01",
+  "amount": 500.00,
+  "commissionType": "PMPM"
+}
+```
+
+</details>
+
+<details>
+<summary><b>Analyse Dispute</b></summary>
+
+```http
+POST http://localhost:8084/api/disputes/analyse
+Content-Type: application/json
+```
+
+```json
+{
+  "text": "Agent John Smith, NPN 1234567, claims missing commission from Aetna for policy EP-9921 in Ohio for March 2026"
+}
+```
+
+Response:
 ```json
 {
   "success": true,
-  "data": {},
-  "message": "Commission calculated successfully",
-  "timestamp": "2026-04-01T10:30:00Z"
+  "data": {
+    "id": 1,
+    "rawText": "Agent John Smith, NPN 1234567...",
+    "agentNpn": "1234567",
+    "agentName": "John Smith",
+    "carrierName": "Aetna",
+    "policyId": "EP-9921",
+    "state": "Ohio",
+    "month": "March 2026",
+    "validity": "VALID",
+    "recommendedAction": "INVESTIGATE",
+    "aiReason": "Commission record exists but payment is pending for over 30 days",
+    "priority": "HIGH",
+    "status": "OPEN"
+  },
+  "message": "Dispute analysed successfully"
 }
 ```
 
-### Pagination
-
-All list endpoints support:
-
-```
-GET /api/commissions?page=0&size=10&sort=createdAt,desc
-```
-
-### Authentication
-
-All endpoints (except `/api/agents/register` and `/api/agents/login`) require:
-
-```
-Authorization: Bearer <jwt_token>
-```
+</details>
 
 ---
 
-## Kafka Event Flow
-
-### Topic: `commission.calculated`
-
-**Published by:** `commission-service`
-**Consumed by:** `notification-service`
-
-```json
-{
-  "agentNpn": "1234567",
-  "agentEmail": "agent@example.com",
-  "carrierId": "AETNA",
-  "month": "2026-04",
-  "totalPayout": 1250.00,
-  "status": "CALCULATED"
-}
-```
-
-### Topic: `dispute.submitted`
-
-**Published by:** `ner-service`
-**Consumed by:** `commission-service`
-
-```json
-{
-  "disputeId": "uuid",
-  "agentNpn": "1234567",
-  "carrierName": "Aetna",
-  "policyId": "EP-9921",
-  "state": "Ohio",
-  "month": "March 2026",
-  "rawText": "Agent John Smith..."
-}
-```
-
-### Dead Letter Topic: `commission.calculated.DLT`
-
-If `notification-service` fails to send an email after 3 retries, the event is routed here for manual review.
-
----
-
-## Project Structure
+## 🏗 Project Structure
 
 ```
-payout-notification-system/
-│
-├── docker-compose.yml               ← Full infrastructure setup
+healthcare-commission-notification-system/
+├── docker-compose.yml
 │
 ├── agent-service/
-│   ├── src/main/java/
-│   │   ├── entity/Agent.java
-│   │   ├── repository/AgentRepository.java
-│   │   ├── service/AgentService.java
-│   │   ├── controller/AgentController.java
-│   │   ├── security/JwtUtil.java
-│   │   └── config/SecurityConfig.java
-│   └── src/main/resources/application.yml
+│   └── src/main/java/com/healthcare/agentservice/
+│       ├── controller/        ← REST endpoints
+│       ├── service/impl/      ← Business logic
+│       ├── repository/        ← Data access
+│       ├── entity/            ← JPA entities
+│       ├── dto/               ← Request/Response DTOs
+│       └── security/          ← JWT filter + config
 │
 ├── commission-service/
-│   ├── src/main/java/
-│   │   ├── entity/CommissionRecord.java
-│   │   ├── repository/CommissionRepository.java
-│   │   ├── service/CommissionService.java
-│   │   ├── controller/CommissionController.java
-│   │   ├── kafka/CommissionEventProducer.java
-│   │   └── kafka/DisputeEventConsumer.java
-│   └── src/main/resources/application.yml
+│   └── src/main/java/com/healthcare/commissionservice/
+│       ├── controller/
+│       ├── service/impl/
+│       ├── repository/
+│       ├── entity/            ← CommissionRecord, enums
+│       ├── dto/
+│       ├── kafka/             ← Producer + event DTOs
+│       └── security/
 │
 ├── notification-service/
-│   ├── src/main/java/
-│   │   ├── entity/NotificationLog.java
-│   │   ├── kafka/PayoutNotificationConsumer.java
-│   │   ├── service/EmailNotificationService.java
-│   │   └── controller/NotificationController.java
-│   └── src/main/resources/application.yml
+│   └── src/main/java/com/healthcare/notificationservice/
+│       ├── controller/
+│       ├── service/           ← EmailService
+│       ├── repository/
+│       ├── entity/            ← NotificationLog
+│       ├── dto/
+│       └── kafka/             ← Consumer
 │
-├── ner-service/
-│   ├── src/main/java/
-│   │   ├── entity/DisputeRecord.java
-│   │   ├── nlp/StanfordNERExtractor.java
-│   │   ├── service/DisputeService.java
-│   │   ├── kafka/DisputeEventProducer.java
-│   │   └── controller/DisputeController.java
-│   └── src/main/resources/application.yml
-│
-├── genai-service/
-│   ├── src/main/java/
-│   │   ├── service/IntentDetectorService.java
-│   │   ├── service/OllamaService.java
-│   │   ├── client/ (Feign clients for all services)
-│   │   └── controller/GenAIController.java
-│   └── src/main/resources/application.yml
-│
-└── README.md
+└── ner-service/
+    └── src/main/java/com/healthcare/ner_service/
+        ├── controller/
+        ├── service/impl/
+        ├── repository/
+        ├── entity/            ← DisputeRecord, enums
+        ├── dto/
+        ├── nlp/               ← Stanford NLP extraction
+        ├── groq/              ← Groq AI integration
+        └── kafka/             ← Producer + event DTOs
 ```
 
 ---
 
-## Frontend
+## 🧠 Key Design Decisions
 
-The UI is built as a **lazy-loaded Angular module** integrated into a host application, mirroring enterprise CRM architecture patterns.
-
-### Pages
-
-| Page | Description |
-|---|---|
-| **Dashboard** | Summary cards + monthly payout trend chart + recent notifications |
-| **Commissions** | Filterable paginated table with calculate/flag-dispute actions |
-| **Dispute Analyser** | Free-text input → coloured entity extraction tags + dispute history |
-| **AI Assistant** | Chat-style interface for natural language commission queries |
-| **Notifications** | Read-only payout notification history |
-| **Agents** | Agent directory with NPN search |
-
-### Key Angular patterns used
-
-- Lazy-loaded feature module with nested child routes
-- RxJS operators: `forkJoin`, `switchMap`, `BehaviorSubject`, `takeUntil`, `debounceTime`
-- `OnPush` change detection on all table/list components
-- HTTP interceptor for JWT attachment and global 401 handling
-- Reactive Forms with custom validators
-- Server-side pagination, filtering, and sorting
+| Decision | Rationale | Trade-off |
+|----------|-----------|-----------|
+| **Event-driven (Kafka)** | Decouples commission processing from notifications — a notification failure never blocks payouts | Added infrastructure complexity; requires Kafka cluster |
+| **Per-service databases** | True data isolation following microservices principles; services can evolve schemas independently | Cross-service queries require API calls; no JOINs across services |
+| **Hybrid NLP pipeline** | Stanford CoreNLP handles general NER (names, orgs, dates) while custom regex handles domain patterns (NPN, Policy ID) that general models miss | Two extraction engines to maintain; need merge logic |
+| **Groq over local LLM** | Cloud API ensures portfolio portability — anyone can run with a free API key, no GPU required | Depends on external API; added network latency |
+| **JWT stateless auth** | No shared session state; each service validates tokens independently, enabling horizontal scaling | Token revocation requires additional infrastructure (blacklist) |
+| **MySQL per service** | Familiar, well-supported RDBMS; JPA/Hibernate integration is seamless | Could use PostgreSQL for advanced features (JSONB, partitioning) |
 
 ---
 
-## What This Project Demonstrates
+## 🗺 Roadmap
 
-| Concept | Where |
-|---|---|
-| Microservices architecture | 5 independent Spring Boot services |
-| Event-driven communication | Kafka producer/consumer across services |
-| Fault tolerance | Dead letter topic + retry in notification-service |
-| Database isolation | Separate PostgreSQL per service |
-| Stateless auth | JWT via Spring Security in agent-service |
-| NLP integration | Stanford CoreNLP in ner-service |
-| GenAI integration | Ollama (Llama 3) in genai-service |
-| API documentation | Swagger UI on every service |
-| Containerisation | Full docker-compose.yml for local dev |
-| Enterprise Angular patterns | Lazy loading, RxJS, OnPush, interceptors |
+- [ ] **Observability**: OpenTelemetry tracing + Prometheus metrics + Grafana dashboards
+- [ ] **Testing**: JUnit 5 + Testcontainers integration tests (target: 80%+ coverage)
+- [ ] **Resilience**: Circuit Breaker (Resilience4j) for Groq API with Stanford NLP fallback
+- [ ] **Caching**: Redis for agent profile lookups and notification deduplication
+- [ ] **Database Migrations**: Flyway versioned schema management
+- [ ] **CI/CD**: GitHub Actions pipeline (test → build → Docker push)
+- [ ] **Cloud Deployment**: AWS ECS/EKS with Terraform IaC
+- [ ] **API Gateway**: Rate limiting, request routing, centralized auth
 
 ---
 
-## Roadmap
+## 👤 Author
 
-- [ ] agent-service — registration + JWT auth
-- [ ] commission-service — CRUD + Kafka producer
-- [ ] notification-service — Kafka consumer + Mailhog email
-- [ ] ner-service — Stanford NLP + Kafka producer
-- [ ] genai-service — Ollama + intent detection
-- [ ] Docker Compose for full system
-- [ ] Angular frontend — all 6 pages
-- [ ] JUnit tests for commission calculation logic
-- [ ] Dead letter queue handling + retry
-- [ ] Architecture diagram (Excalidraw)
-- [ ] Postman collection
+**Vikrant Ahiwale** — Backend & Platform Engineer
+
+[![GitHub](https://img.shields.io/badge/GitHub-ahiwalevikrant-181717?logo=github)](https://github.com/ahiwalevikrant)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-vikrant--ahiwale-0A66C2?logo=linkedin)](https://linkedin.com/in/vikrant-ahiwale)
+[![Portfolio](https://img.shields.io/badge/Portfolio-vikrant--ahiwale-FF6B6B)](https://vikrant-ahiwale-sde.lovable.app)
 
 ---
 
-## Author
+## 📄 License
 
-**Vikrant Ahiwale**
-Product Engineer | Java · Spring Boot · Angular · React
-
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-vikrant--ahiwale-blue)](https://linkedin.com/in/vikrant-ahiwale)
-[![GitHub](https://img.shields.io/badge/GitHub-ahiwalevikrant-black)](https://github.com/ahiwalevikrant)
-
----
-
-> Built as a portfolio project to demonstrate microservices, event-driven architecture, NLP, and GenAI integration in the US healthcare insurance domain.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
